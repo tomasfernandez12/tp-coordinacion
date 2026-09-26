@@ -24,20 +24,35 @@ class AggregationFilter:
             MOM_HOST, OUTPUT_QUEUE
         )
         self.fruit_top_by_client = {}
+        self.eof_sums_by_client = {}
 
     def _process_data(self, client_id, fruit, amount):
         logging.info("Processing data message")
         fruit_top = self.fruit_top_by_client.setdefault(client_id, [])
         for i in range(len(fruit_top)):
             if fruit_top[i].fruit == fruit:
-                fruit_top[i] = fruit_top[i] + fruit_item.FruitItem(
+                updated_fruit_item = fruit_top.pop(i) + fruit_item.FruitItem(
                     fruit, amount
                 )
+                bisect.insort(fruit_top, updated_fruit_item)
                 return
         bisect.insort(fruit_top, fruit_item.FruitItem(fruit, amount))
 
-    def _process_eof(self, client_id):
-        logging.info("Received EOF")
+    def _process_eof(self, client_id, sum_id):
+        eof_sums = self.eof_sums_by_client.setdefault(client_id, set())
+        eof_sums.add(sum_id)
+        if len(eof_sums) < SUM_AMOUNT:
+            logging.info(
+                "Received EOF from sum %s for client %s (%s/%s)",
+                sum_id,
+                client_id,
+                len(eof_sums),
+                SUM_AMOUNT,
+            )
+            return
+
+        logging.info("Received EOF from all sums for client %s", client_id)
+        self.eof_sums_by_client.pop(client_id, None)
         fruit_top = self.fruit_top_by_client.pop(client_id, [])
         fruit_chunk = list(fruit_top[-TOP_SIZE:])
         fruit_chunk.reverse()
@@ -56,8 +71,10 @@ class AggregationFilter:
         fields = message_protocol.internal.deserialize(message)
         if len(fields) == 3:
             self._process_data(*fields)
-        else:
+        elif len(fields) == 2:
             self._process_eof(*fields)
+        else:
+            raise ValueError(f"Unexpected aggregation message: {fields}")
         ack()
 
     def start(self):
