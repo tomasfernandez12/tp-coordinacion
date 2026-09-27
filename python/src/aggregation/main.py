@@ -63,7 +63,7 @@ class AggregationFilter:
             )
         )
         self.output_queue.send(
-            message_protocol.internal.serialize([client_id, result])
+            message_protocol.internal.serialize([client_id, ID, result])
         )
 
     def process_messsage(self, message, ack, nack):

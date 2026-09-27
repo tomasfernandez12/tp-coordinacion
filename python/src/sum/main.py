@@ -1,6 +1,7 @@
 import os
 import logging
 import threading
+import hashlib
 
 from common import middleware, message_protocol, fruit_item
 
@@ -44,6 +45,10 @@ class SumFilter:
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
+    def _aggregation_index(self, fruit):
+        fruit_hash = hashlib.sha256(fruit.encode("utf-8")).digest()
+        return int.from_bytes(fruit_hash, "big") % AGGREGATION_AMOUNT
+
     def _process_eof(self, client_id):
         if client_id in self.closed_clients:
             return
@@ -51,16 +56,16 @@ class SumFilter:
         logging.info("Broadcasting data messages for client %s", client_id)
         amount_by_fruit = self.amount_by_client.pop(client_id, {})
         for final_fruit_item in amount_by_fruit.values():
-            for data_output_exchange in self.data_output_exchanges:
-                data_output_exchange.send(
-                    message_protocol.internal.serialize(
-                        [
-                            client_id,
-                            final_fruit_item.fruit,
-                            final_fruit_item.amount,
-                        ]
-                    )
+            aggregation_index = self._aggregation_index(final_fruit_item.fruit)
+            self.data_output_exchanges[aggregation_index].send(
+                message_protocol.internal.serialize(
+                    [
+                        client_id,
+                        final_fruit_item.fruit,
+                        final_fruit_item.amount,
+                    ]
                 )
+            )
 
         logging.info("Broadcasting EOF message for client %s", client_id)
         for data_output_exchange in self.data_output_exchanges:
@@ -71,7 +76,8 @@ class SumFilter:
 
     def process_control_message(self, message, ack, nack):
         [client_id] = message_protocol.internal.deserialize(message)
-        self._process_eof(client_id)
+        with self.state_lock:
+            self._process_eof(client_id)
         ack()
 
     def process_data_messsage(self, message, ack, nack):
