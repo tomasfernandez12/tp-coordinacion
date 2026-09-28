@@ -2,6 +2,7 @@ import os
 import logging
 import threading
 import hashlib
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -20,7 +21,6 @@ class SumFilter:
         self.input_queue = middleware.MessageMiddlewareQueueRabbitMQ(
             MOM_HOST, INPUT_QUEUE
         )
-        # Se usa la misma routing key para que cada sum suscripto reciba una copia del EOF.
         self.control_output_exchange = middleware.MessageMiddlewareExchangeRabbitMQ(
             MOM_HOST, SUM_CONTROL_EXCHANGE, [SUM_CONTROL_ROUTING_KEY]
         )
@@ -34,7 +34,6 @@ class SumFilter:
             )
             self.data_output_exchanges.append(data_output_exchange)
         self.amount_by_client = {}
-        # Ambos consumers acceden al acumulado desde threads distintos; este lock serializa sus cambios.
         self.closed_clients = set()
         self.state_lock = threading.Lock()
 
@@ -45,8 +44,9 @@ class SumFilter:
             fruit, fruit_item.FruitItem(fruit, 0)
         ) + fruit_item.FruitItem(fruit, int(amount))
 
-    def _aggregation_index(self, fruit):
-        fruit_hash = hashlib.sha256(fruit.encode("utf-8")).digest()
+    def _aggregation_index(self, client_id, fruit):
+        partition_key = message_protocol.internal.serialize([client_id, fruit])
+        fruit_hash = hashlib.sha256(partition_key).digest()
         return int.from_bytes(fruit_hash, "big") % AGGREGATION_AMOUNT
 
     def _process_eof(self, client_id):
@@ -56,7 +56,9 @@ class SumFilter:
         logging.info("Broadcasting data messages for client %s", client_id)
         amount_by_fruit = self.amount_by_client.pop(client_id, {})
         for final_fruit_item in amount_by_fruit.values():
-            aggregation_index = self._aggregation_index(final_fruit_item.fruit)
+            aggregation_index = self._aggregation_index(
+                client_id, final_fruit_item.fruit
+            )
             self.data_output_exchanges[aggregation_index].send(
                 message_protocol.internal.serialize(
                     [
@@ -95,6 +97,17 @@ class SumFilter:
             raise ValueError(f"Unexpected sum input message: {fields}")
         ack()
 
+    def _stop_control_consumer(self):
+        connection_manager = self.control_input_exchange.conn
+        connection = connection_manager.connection
+        channel = connection_manager.channel
+        if connection is None or not connection.is_open or channel is None:
+            return
+        try:
+            connection.add_callback_threadsafe(channel.stop_consuming)
+        except Exception as exc:
+            logging.warning("Could not stop sum control consumer: %s", exc)
+
     def start(self):
         control_thread = threading.Thread(
             target=self.control_input_exchange.start_consuming,
@@ -103,11 +116,35 @@ class SumFilter:
             daemon=True,
         )
         control_thread.start()
-        self.input_queue.start_consuming(self.process_data_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_data_messsage)
+        finally:
+            self._stop_control_consumer()
+            control_thread.join()
+            middleware_objects = [
+                self.input_queue,
+                self.control_output_exchange,
+                self.control_input_exchange,
+                *self.data_output_exchanges,
+            ]
+            for middleware_object in middleware_objects:
+                try:
+                    middleware_object.close()
+                except Exception as exc:
+                    logging.warning("Error closing middleware connection: %s", exc)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM; stopping sum %s", ID)
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as exc:
+            logging.warning("Could not stop sum data consumer: %s", exc)
+        self._stop_control_consumer()
 
 def main():
     logging.basicConfig(level=logging.INFO)
     sum_filter = SumFilter()
+    signal.signal(signal.SIGTERM, sum_filter.handle_sigterm)
     sum_filter.start()
     return 0
 

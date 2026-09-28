@@ -1,5 +1,6 @@
 import os
 import logging
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -52,12 +53,27 @@ class JoinFilter:
         ack()
 
     def start(self):
-        self.input_queue.start_consuming(self.process_messsage)
+        try:
+            self.input_queue.start_consuming(self.process_messsage)
+        finally:
+            for middleware_object in (self.input_queue, self.output_queue):
+                try:
+                    middleware_object.close()
+                except Exception as exc:
+                    logging.warning("Error closing middleware connection: %s", exc)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM; stopping join")
+        try:
+            self.input_queue.stop_consuming()
+        except Exception as exc:
+            logging.warning("Could not stop join consumer: %s", exc)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     join_filter = JoinFilter()
+    signal.signal(signal.SIGTERM, join_filter.handle_sigterm)
     join_filter.start()
 
     return 0

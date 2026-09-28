@@ -1,6 +1,7 @@
 import os
 import logging
 import bisect
+import signal
 
 from common import middleware, message_protocol, fruit_item
 
@@ -78,12 +79,27 @@ class AggregationFilter:
         ack()
 
     def start(self):
-        self.input_exchange.start_consuming(self.process_messsage)
+        try:
+            self.input_exchange.start_consuming(self.process_messsage)
+        finally:
+            for middleware_object in (self.input_exchange, self.output_queue):
+                try:
+                    middleware_object.close()
+                except Exception as exc:
+                    logging.warning("Error closing middleware connection: %s", exc)
+
+    def handle_sigterm(self, signum, frame):
+        logging.info("Received SIGTERM; stopping aggregation %s", ID)
+        try:
+            self.input_exchange.stop_consuming()
+        except Exception as exc:
+            logging.warning("Could not stop aggregation consumer: %s", exc)
 
 
 def main():
     logging.basicConfig(level=logging.INFO)
     aggregation_filter = AggregationFilter()
+    signal.signal(signal.SIGTERM, aggregation_filter.handle_sigterm)
     aggregation_filter.start()
     return 0
 
