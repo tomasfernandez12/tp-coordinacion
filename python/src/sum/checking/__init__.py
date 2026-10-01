@@ -6,6 +6,7 @@ from common import middleware, message_protocol
 class PacketManager:
 
     def __init__(self, host, sum_id, sum_amount, sum_prefix):
+        """Inicializa el estado de coordinación y sus exchanges RabbitMQ."""
         self.sum_id = sum_id
         self.sum_amount = sum_amount
         self.exchange_name = f"{sum_prefix}_control_exchange"
@@ -40,20 +41,32 @@ class PacketManager:
         self.state_lock = threading.Lock()
 
     def record_processed_packet_locked(self, client_id):
+        """Incrementa el conteo local de paquetes procesados por un cliente.
+        """
+
         self.processed_packets_by_client[client_id] = (
             self.processed_packets_by_client.get(client_id, 0) + 1
         )
 
     def is_closed_locked(self, client_id):
+        """Indica si la coordinación del cliente ya fue finalizada.
+        """
+
         return client_id in self.closed_clients
 
     def finish_client_locked(self, client_id):
+        """Elimina el estado del cliente y lo marca como finalizado.
+        """
+
         self.processed_packets_by_client.pop(client_id, None)
         self.count_reports_by_client_and_round.pop(client_id, None)
         self.coordinations_by_client.pop(client_id, None)
         self.closed_clients.add(client_id)
 
     def start_coordination(self, client_id, total_packets):
+        """Inicia el conteo distribuido, salvo que ya esté iniciado o cerrado.
+        """
+
         with self.state_lock:
             if (
                 client_id in self.closed_clients
@@ -74,6 +87,11 @@ class PacketManager:
         )
 
     def _report_processed_count(self, client_id, coordinator_id, round_id):
+        """Publica el conteo local correspondiente a una ronda solicitada para un cliente.
+        Reutiliza el conteo si llega otra solicitud de la misma ronda e ignora
+        solicitudes de rondas anteriores.
+        """
+
         with self.state_lock:
             previous_report = self.count_reports_by_client_and_round.get(client_id)
             if previous_report is not None and previous_report[0] == round_id:
@@ -95,6 +113,10 @@ class PacketManager:
         self.control_response_exchanges[coordinator_id].send(report)
 
     def _process_report(self, client_id, sum_id, round_id, processed_packets):
+        """Registra un reporte y avanza la coordinación cuando están todos.
+
+        Al completar una ronda, solicita otra si quedan paquetes por contar,de lo contrario, publica el commit.
+        """
         next_request = None
         should_commit = False
         with self.state_lock:
@@ -130,6 +152,9 @@ class PacketManager:
             self._publish_count_request(client_id, *next_request)
 
     def _publish_count_request(self, client_id, remaining_packets, round_id):
+        """Publica una solicitud de conteo para la ronda indicada.
+        """
+
         self.control_output_exchange.send(
             message_protocol.internal.serialize(
                 [
@@ -164,6 +189,10 @@ class PacketManager:
         self.control_input_exchange.start_consuming(on_message_callback)
 
     def stop_consuming(self):
+        """Solicita detener el consumidor desde el thread de su conexión.
+        No hace nada si la conexión o el canal todavía no están disponibles.
+        """
+
         connection_manager = self.control_input_exchange.conn
         connection = connection_manager.connection
         channel = connection_manager.channel
