@@ -134,7 +134,6 @@ class SumFilter:
             self.input_queue.stop_consuming()
         except Exception as exc:
             logging.warning("Could not stop sum data consumer: %s", exc)
-        self._stop_control_consumer()
 
 def main():
     logging.basicConfig(level=logging.INFO)
